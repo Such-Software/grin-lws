@@ -4,11 +4,12 @@
 //! Uses `sqlx::Any` so a single build serves both Postgres (scale) and SQLite
 //! (single operator) — the driver is chosen at runtime from `DATABASE_URL`.
 //!
-//! NOTE (dialect): the SQL below uses Postgres `$N` placeholders. sqlx's `Any`
-//! backend forwards placeholders verbatim, so a SQLite deployment should run the
-//! SQLite-flavored migration (see `migrations/`) and, if it hits placeholder
-//! incompatibility, swap `$N` for `?`. This scaffold keeps one dialect for
-//! readability; pick your target DB before landing the scanner.
+//! Dialect: the SQL below uses Postgres `$N` placeholders and runs unchanged on
+//! BOTH Postgres and SQLite through sqlx's `Any` driver (SQLite accepts `$N`
+//! numbered parameters and binds them positionally). Verified end-to-end by the
+//! `sqlite_probe` test, which applies the real migration + reused-placeholder
+//! upserts against SQLite. `DEFAULT CURRENT_TIMESTAMP` (not `now()`) keeps the
+//! schema portable.
 //!
 //! SECURITY: only view-only data is ever stored. No spend key, no private key.
 
@@ -329,6 +330,82 @@ pub async fn set_cursor(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod sqlite_probe {
+    use super::*;
+
+    /// Run the Postgres-flavored `0001_init.sql` against SQLite and exercise the
+    /// real helpers — including the REUSED-placeholder upsert (`set_cursor` binds
+    /// `$1/$2/$3` twice each) and quoted `"commit"`. Scopes the Phase-4 dual-DB
+    /// work: what (if anything) actually breaks on SQLite.
+    #[tokio::test]
+    async fn full_schema_and_reused_placeholders_on_sqlite() {
+        sqlx::any::install_default_drivers();
+        let path = std::env::temp_dir().join("grinlws_sqlite_probe.db");
+        let _ = std::fs::remove_file(&path);
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect sqlite");
+
+        // Apply the real migration. Strip `-- ...` comments FIRST (they contain
+        // semicolons), THEN split into statements.
+        let schema = include_str!("../migrations/0001_init.sql");
+        let no_comments: String = schema
+            .lines()
+            .map(|l| match l.find("--") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for chunk in no_comments.split(';') {
+            let sql = chunk.trim();
+            if sql.is_empty() {
+                continue;
+            }
+            sqlx::query(sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("SQLite rejected: {sql}\n  -> {e}"));
+        }
+
+        // accounts + reused-placeholder upsert (set_cursor $1/$2/$3 twice each)
+        assert!(register_account(&pool, "aa", 100).await.expect("register"));
+        set_cursor(&pool, 5, 200, "hashA").await.expect("set_cursor insert");
+        set_cursor(&pool, 9, 210, "hashB").await.expect("set_cursor upsert (reused $N)");
+        let c = get_cursor(&pool).await.expect("get_cursor").expect("row");
+        assert_eq!((c.output_mmr_index, c.tip_height, c.tip_hash.as_str()), (9, 210, "hashB"));
+
+        // outputs: insert (quoted "commit", bool, 9 binds) + maturity read
+        let out = StoredOutput {
+            commit: "09ab".into(),
+            value: 1_000_000_000,
+            height: 100,
+            mmr_index: 42,
+            is_coinbase: true,
+            lock_height: 100 + 1440,
+            key_id: Some("0400".into()),
+            n_child: Some(0),
+        };
+        insert_output(&pool, &out, "aa").await.expect("insert_output");
+        let (total, count) = account_totals(&pool, "aa").await.expect("totals");
+        assert_eq!((total, count), (1_000_000_000, 1));
+        // immature coinbase: unlocked at tip 200 must be 0; at tip 1540+ it's spendable
+        let (unlocked_now, _) = account_unlocked_totals(&pool, "aa", 200).await.expect("unlocked");
+        assert_eq!(unlocked_now, 0, "immature coinbase not unlocked");
+        let (unlocked_mature, _) = account_unlocked_totals(&pool, "aa", 2000).await.expect("unlocked2");
+        assert_eq!(unlocked_mature, 1_000_000_000, "mature coinbase unlocked");
+        // spend by absence
+        mark_spent(&pool, "09ab", 300).await.expect("mark_spent");
+        assert_eq!(account_totals(&pool, "aa").await.unwrap().0, 0, "spent → zero balance");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Roll back all stored state above `fork_height` after a detected reorg.

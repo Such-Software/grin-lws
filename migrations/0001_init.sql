@@ -6,10 +6,12 @@
 -- is view-only (it can recognize a wallet's outputs and read amounts, but
 -- cannot spend).
 --
--- Dialect note: written for PostgreSQL. For a single-operator SQLite build,
--- replace BIGINT -> INTEGER, BOOLEAN -> INTEGER (0/1), TIMESTAMPTZ ->
--- TEXT/INTEGER, and drop `DEFAULT now()`. `commit` is a reserved word in SQL,
--- hence it is always quoted as "commit".
+-- Dialect: runs as-is on BOTH PostgreSQL and SQLite (verified in a test).
+-- SQLite accepts the Postgres type names via its type-affinity rules
+-- (BIGINT/BOOLEAN/TIMESTAMPTZ), and the app binds `$N` placeholders through
+-- sqlx's `Any` driver, which SQLite accepts. `DEFAULT CURRENT_TIMESTAMP` is
+-- portable (unlike `now()`). `commit` is a reserved word, so it is always
+-- quoted as "commit".
 
 -- An account = one registered view credential.
 CREATE TABLE IF NOT EXISTS accounts (
@@ -21,7 +23,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- How far the scanner has processed this account. Advances toward the tip;
     -- lowered only by an explicit backwards rescan.
     scan_height  BIGINT      NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Outputs the scanner recognized for a registered account (rewound rangeproof

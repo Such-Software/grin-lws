@@ -125,8 +125,8 @@ a no-op.
 
 ## Database schema
 
-See `migrations/0001_init.sql`. Postgres flavored; a SQLite single-operator build
-swaps the type spellings (noted inline). **Never** stores a private/spend key.
+See `migrations/0001_init.sql`. It runs **unchanged on both PostgreSQL and
+SQLite** (verified in a test). **Never** stores a private/spend key.
 
 ```
 accounts(rewind_hash PK, start_height, scan_height, created_at)
@@ -208,7 +208,7 @@ Steps 3–5 are the bulk of the work and are why this is its own project.
 ```sh
 # 1. Provision a DB and run the migration.
 #    Postgres:  createdb grinlws && psql grinlws < migrations/0001_init.sql
-#    SQLite:    sqlite3 grin-lws.db < migrations/0001_init.sql   (after type-swap)
+#    SQLite:    sqlite3 grin-lws.db < migrations/0001_init.sql
 # 2. Configure.
 cp .env.example .env    # edit DATABASE_URL + GRIN_NODE_URL
 # 3. Run.
