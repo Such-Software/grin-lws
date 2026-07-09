@@ -100,10 +100,19 @@ async fn tick(pool: &AnyPool, node: &GrinNode) -> crate::error::Result<()> {
     // ── Phase 2: spend reconcile (by absence from the unspent set) ──────────
     reconcile_spends(pool, node, tip_height).await?;
 
-    // ── Phase 3: advance the cursor + caught-up accounts ────────────────────
+    // ── Phase 3: advance the cursor + the accounts we actually scanned ──────
     // (Only after discovery AND reconcile succeeded — Risk R1.)
     db::set_cursor(pool, new_mmr_index as i64, tip_height as i64, &tip_hash).await?;
-    db::advance_caught_up_scan_heights(pool, tip_height as i64, prev_tip as i64).await?;
+    // Advance ONLY the accounts that were in this tick's `caught_up` set — i.e.
+    // the ones the forward scan above actually covered. A blanket
+    // UPDATE-by-height would also mark an account that REGISTERED DURING this
+    // tick's scan (so it was never in `caught_up`, never scanned) as caught-up,
+    // leaving it stuck at a 0 balance forever — and the backend's synced gate
+    // would then trust that 0. Such an account instead stays "behind" and is
+    // picked up by the backfill phase on a later tick.
+    for rh in &caught_up {
+        db::set_account_scan_height(pool, rh, tip_height as i64).await?;
+    }
 
     // ── Phase 4: backfill one pending new account (birthday → cursor) ───────
     if let Some(acct) = accounts.iter().find(|a| a.scan_height < prev_tip) {

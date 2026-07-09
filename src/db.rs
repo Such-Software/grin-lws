@@ -117,22 +117,10 @@ pub async fn list_accounts(pool: &AnyPool) -> Result<Vec<AccountRow>> {
         .collect())
 }
 
-/// Advance the scan height of already-caught-up accounts (scan_height at/above
-/// the previous tip) to the new tip after a forward scan pass.
-pub async fn advance_caught_up_scan_heights(
-    pool: &AnyPool,
-    to_height: i64,
-    from_height: i64,
-) -> Result<()> {
-    sqlx::query("UPDATE accounts SET scan_height = $1 WHERE scan_height >= $2")
-        .bind(to_height)
-        .bind(from_height)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Set one account's scan height (used after its backfill completes).
+/// Set one account's scan height (after a forward-scan pass covers it, or after
+/// its backfill completes). Advancing per-account (rather than a blanket
+/// UPDATE-by-height) is deliberate: it must never mark an account that was not
+/// actually scanned as caught-up.
 pub async fn set_account_scan_height(pool: &AnyPool, rewind_hash: &str, height: i64) -> Result<()> {
     sqlx::query("UPDATE accounts SET scan_height = $1 WHERE rewind_hash = $2")
         .bind(height)
