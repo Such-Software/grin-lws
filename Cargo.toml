@@ -1,0 +1,51 @@
+[package]
+name = "grin-lws"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Grin light-wallet-server: register a view credential, scan the chain in the background, store recognized outputs in a DB, and serve balance/outputs/broadcast/height."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "grin-lws"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server + client.
+tokio = { version = "1.35", features = ["full"] }
+axum = { version = "0.7", features = ["macros"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+futures = "0.3"
+hex = "0.4"
+dotenvy = "0.15"
+thiserror = "1.0"
+
+# Persistence. This is a REAL light-wallet-server: it maintains a per-account
+# output store and a reorg-safe chain cursor, so it NEEDS a database. Postgres is
+# the default for scale; SQLite works for single-operator deployments (enable the
+# `sqlite` feature and point DATABASE_URL at a file). Runtime queries only (no
+# compile-time `query!` macros) so the crate builds without a live DB.
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "any",
+    "postgres",
+    "sqlite",
+    "macros",
+    "migrate",
+    "chrono",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# ECDH (secp256k1) + AES-256-GCM for the grin-wallet Owner API v3 secure channel,
+# IF this service drives a grin-wallet as its scan/rewind engine instead of
+# rewinding rangeproofs itself. Uncomment + pin when the scanner lands.
+# secp256k1 = "0.28"
+# aes-gcm = "0.10"
+
+[dev-dependencies]
+tokio-test = "0.4"
