@@ -46,11 +46,13 @@ sqlx = { version = "0.7", default-features = false, features = [
 ] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# ECDH (secp256k1) + AES-256-GCM for the grin-wallet Owner API v3 secure channel,
-# IF this service drives a grin-wallet as its scan/rewind engine instead of
-# rewinding rangeproofs itself. Uncomment + pin when the scanner lands.
-# secp256k1 = "0.28"
-# aes-gcm = "0.10"
+# View-only Grin rangeproof rewind — recognize a wallet's outputs from its
+# `rewind_hash` alone (no spend key). `grin_secp256k1zkp` is Grin's OWN published
+# crate (their fork of libsecp256k1-zkp) providing the C bulletproof rewind — we
+# depend on it, we do not republish it. `blake2` computes the v3 rewind nonce.
+# See src/rewind.rs. (C-FFI: the build host needs a C compiler.)
+grin_secp256k1zkp = "0.7.15"
+blake2 = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"

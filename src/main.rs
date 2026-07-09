@@ -42,6 +42,7 @@ mod config;
 mod db;
 mod error;
 mod grin;
+mod rewind;
 mod scanner;
 mod secret;
 

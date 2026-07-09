@@ -171,16 +171,9 @@ async fn read_capped(resp: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Rewind a single output's rangeproof against an account's `rewind_hash`. On a
-/// match, returns the recovered value + derivation path; `None` if the output
-/// does not belong to the account.
-///
-/// STUB (the core deferred milestone): this is the server-side analog of
-/// `grin_recover_output`. It needs the grin crypto stack (secp256k1 +
-/// bulletproofs) to compute the rewind nonce from `rewind_hash` + commitment and
-/// rewind the proof. Uncomment the `secp256k1` / `aes-gcm`-adjacent crypto deps
-/// in Cargo.toml and port the rewind + proof-message parse when the scanner
-/// lands.
+/// The recovered value + advisory derivation identifier for a matched output.
+/// `key_id` is the authoritative 17-byte Grin Identifier (hex); `n_child` is
+/// grin-canonical (see [`crate::rewind`]).
 #[allow(dead_code)]
 pub struct RewoundOutput {
     pub value: u64,
@@ -188,9 +181,38 @@ pub struct RewoundOutput {
     pub n_child: u32,
 }
 
+/// Rewind a single block output against an account's `rewind_hash` (VIEW-ONLY).
+/// Returns the recovered value + advisory derivation path on a match, or `None`
+/// if the output does not belong to the account (or the node data is malformed).
+///
+/// `rewind_hash` is 64 hex chars (a 32-byte view credential); `out.commit` is a
+/// 33-byte Pedersen commitment and `out.proof` the Bulletproof, both hex. Every
+/// decode is fallible-to-`None`, so hostile/garbled node data can never panic the
+/// scanner. The crypto (and its v3-only limitation) lives in [`crate::rewind`].
 #[allow(dead_code)]
-pub fn rewind_output(_rewind_hash: &str, _out: &ChainOutput) -> Option<RewoundOutput> {
-    // TODO: compute nonce = f(rewind_hash, commit); rewind bulletproof; parse
-    // proof message -> (value, key_id, n_child). Returns None on non-match.
-    None
+pub fn rewind_output(rewind_hash: &str, out: &ChainOutput) -> Option<RewoundOutput> {
+    let rh: [u8; 32] = decode_hex_array(rewind_hash)?;
+    let commit: [u8; crate::rewind::COMMITMENT_LEN] = decode_hex_array(&out.commit)?;
+    let proof = hex::decode(&out.proof).ok()?;
+    match crate::rewind::rewind_output_view_only(&rh, &commit, &proof) {
+        Ok(Some(r)) => Some(RewoundOutput {
+            value: r.value,
+            key_id: r.key_id,
+            n_child: r.n_child,
+        }),
+        Ok(None) => None,
+        Err(e) => {
+            // Invalid nonce / oversized proof from a hostile or lagging node —
+            // skip this output for this account rather than failing the batch.
+            tracing::trace!(error = %e, "grin rewind skipped an output");
+            None
+        }
+    }
+}
+
+/// Decode a fixed-length hex string into `[u8; N]`; `None` on bad hex or a
+/// length mismatch (never panics on hostile node data).
+#[allow(dead_code)]
+fn decode_hex_array<const N: usize>(s: &str) -> Option<[u8; N]> {
+    hex::decode(s).ok()?.try_into().ok()
 }
