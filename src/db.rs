@@ -38,11 +38,24 @@ pub struct StoredOutput {
     pub n_child: Option<u32>,
 }
 
-/// The scanner's resume point.
+/// The scanner's resume point: how far through the output PMMR it has scanned,
+/// plus the chain tip it last saw (for reorg detection).
 #[derive(Debug, Clone)]
 pub struct ChainCursor {
-    pub height: u64,
-    pub block_hash: String,
+    /// Highest output PMMR index already processed (the forward-scan resume point).
+    pub output_mmr_index: u64,
+    /// Chain tip height at the last tick (reorg checkpoint).
+    pub tip_height: u64,
+    /// Chain tip block hash at the last tick (reorg detection probe).
+    pub tip_hash: String,
+}
+
+/// A registered account, for the scanner's per-account loop.
+#[derive(Debug, Clone)]
+pub struct AccountRow {
+    pub rewind_hash: String,
+    pub start_height: u64,
+    pub scan_height: u64,
 }
 
 /// Connect (lazily) to the database. Does not require a live DB at construction;
@@ -74,12 +87,63 @@ pub async fn register_account(pool: &AnyPool, rewind_hash: &str, start_height: i
     Ok(res.rows_affected() > 0)
 }
 
-/// All registered accounts' rewind_hashes (the scanner iterates these per block).
+/// All registered accounts' rewind_hashes (the admin `/list_accounts` view).
 pub async fn list_account_hashes(pool: &AnyPool) -> Result<Vec<String>> {
     let rows = sqlx::query("SELECT rewind_hash FROM accounts")
         .fetch_all(pool)
         .await?;
     Ok(rows.iter().map(|r| r.get::<String, _>("rewind_hash")).collect())
+}
+
+/// All registered accounts with their scan progress (the scanner's per-account
+/// loop iterates these).
+pub async fn list_accounts(pool: &AnyPool) -> Result<Vec<AccountRow>> {
+    let rows = sqlx::query("SELECT rewind_hash, start_height, scan_height FROM accounts")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| AccountRow {
+            rewind_hash: r.get::<String, _>("rewind_hash"),
+            start_height: r.get::<i64, _>("start_height").max(0) as u64,
+            scan_height: r.get::<i64, _>("scan_height").max(0) as u64,
+        })
+        .collect())
+}
+
+/// Advance the scan height of already-caught-up accounts (scan_height at/above
+/// the previous tip) to the new tip after a forward scan pass.
+pub async fn advance_caught_up_scan_heights(
+    pool: &AnyPool,
+    to_height: i64,
+    from_height: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE accounts SET scan_height = $1 WHERE scan_height >= $2")
+        .bind(to_height)
+        .bind(from_height)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set one account's scan height (used after its backfill completes).
+pub async fn set_account_scan_height(pool: &AnyPool, rewind_hash: &str, height: i64) -> Result<()> {
+    sqlx::query("UPDATE accounts SET scan_height = $1 WHERE rewind_hash = $2")
+        .bind(height)
+        .bind(rewind_hash)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clamp any account whose scan height sits above `fork_height` back down to it
+/// (a reorg rolled the chain back below their recorded progress).
+pub async fn clamp_account_scan_heights(pool: &AnyPool, fork_height: i64) -> Result<()> {
+    sqlx::query("UPDATE accounts SET scan_height = $1 WHERE scan_height > $1")
+        .bind(fork_height)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Lower an account's scan progress to `height` for a backwards rescan (also
@@ -128,7 +192,7 @@ pub async fn insert_output(pool: &AnyPool, out: &StoredOutput, rewind_hash: &str
     Ok(())
 }
 
-/// Mark an output spent when its commitment appears as a tx input on-chain.
+/// Mark an output spent (its commitment left the node's unspent set).
 pub async fn mark_spent(pool: &AnyPool, commit: &str, spent_height: i64) -> Result<()> {
     sqlx::query("UPDATE outputs SET spent = true, spent_height = $2 WHERE \"commit\" = $1")
         .bind(commit)
@@ -136,6 +200,25 @@ pub async fn mark_spent(pool: &AnyPool, commit: &str, spent_height: i64) -> Resu
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Un-mark a spend (a reorg brought a previously-spent output back into the
+/// unspent set). Self-heals an over-eager spend reconcile.
+pub async fn mark_unspent(pool: &AnyPool, commit: &str) -> Result<()> {
+    sqlx::query("UPDATE outputs SET spent = false, spent_height = NULL WHERE \"commit\" = $1")
+        .bind(commit)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Every currently-unspent commitment across all accounts — the set the scanner
+/// re-checks against the node to detect spends by absence.
+pub async fn all_unspent_commits(pool: &AnyPool) -> Result<Vec<String>> {
+    let rows = sqlx::query("SELECT \"commit\" FROM outputs WHERE spent = false")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("commit")).collect())
 }
 
 /// Unspent outputs for an account — the spendable set, WITH derivation paths.
@@ -158,6 +241,28 @@ pub async fn account_totals(pool: &AnyPool, rewind_hash: &str) -> Result<(u64, u
          FROM outputs WHERE rewind_hash = $1 AND spent = false",
     )
     .bind(rewind_hash)
+    .fetch_one(pool)
+    .await?;
+    let total: i64 = row.try_get("total").unwrap_or(0);
+    let n: i64 = row.try_get("n").unwrap_or(0);
+    Ok((total.max(0) as u64, n.max(0) as u64))
+}
+
+/// (unlocked total, count) for an account: unspent AND spendable at `tip_height`
+/// (`lock_height <= tip`). Immature coinbase / time-locked outputs are excluded,
+/// so this never reports coins a spend would reject. Mirrors monero-lws's
+/// unlocked-vs-total split.
+pub async fn account_unlocked_totals(
+    pool: &AnyPool,
+    rewind_hash: &str,
+    tip_height: i64,
+) -> Result<(u64, u64)> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(value),0) AS total, COUNT(*) AS n \
+         FROM outputs WHERE rewind_hash = $1 AND spent = false AND lock_height <= $2",
+    )
+    .bind(rewind_hash)
+    .bind(tip_height)
     .fetch_one(pool)
     .await?;
     let total: i64 = row.try_get("total").unwrap_or(0);
@@ -193,25 +298,34 @@ fn row_to_output(r: &sqlx::any::AnyRow) -> StoredOutput {
 
 // ── chain cursor (reorg-safe resume) ───────────────────────────────────────────
 
-/// Read the scanner's global cursor (last block processed across all accounts).
+/// Read the scanner's global cursor (output-PMMR position + last-seen tip).
 pub async fn get_cursor(pool: &AnyPool) -> Result<Option<ChainCursor>> {
-    let row = sqlx::query("SELECT height, block_hash FROM chain_cursor WHERE id = 1")
+    let row = sqlx::query("SELECT output_mmr_index, height, block_hash FROM chain_cursor WHERE id = 1")
         .fetch_optional(pool)
         .await?;
     Ok(row.map(|r| ChainCursor {
-        height: r.get::<i64, _>("height").max(0) as u64,
-        block_hash: r.get::<String, _>("block_hash"),
+        output_mmr_index: r.get::<i64, _>("output_mmr_index").max(0) as u64,
+        tip_height: r.get::<i64, _>("height").max(0) as u64,
+        tip_hash: r.get::<String, _>("block_hash"),
     }))
 }
 
-/// Advance (or initialize) the scanner cursor.
-pub async fn set_cursor(pool: &AnyPool, height: i64, block_hash: &str) -> Result<()> {
+/// Advance (or initialize) the scanner cursor: the highest output PMMR index
+/// processed, plus the tip height + hash at that point (`height` / `block_hash`
+/// columns now hold the tip checkpoint, not a per-block position).
+pub async fn set_cursor(
+    pool: &AnyPool,
+    output_mmr_index: i64,
+    tip_height: i64,
+    tip_hash: &str,
+) -> Result<()> {
     sqlx::query(
-        "INSERT INTO chain_cursor (id, height, block_hash) VALUES (1, $1, $2) \
-         ON CONFLICT (id) DO UPDATE SET height = $1, block_hash = $2",
+        "INSERT INTO chain_cursor (id, output_mmr_index, height, block_hash) VALUES (1, $1, $2, $3) \
+         ON CONFLICT (id) DO UPDATE SET output_mmr_index = $1, height = $2, block_hash = $3",
     )
-    .bind(height)
-    .bind(block_hash)
+    .bind(output_mmr_index)
+    .bind(tip_height)
+    .bind(tip_hash)
     .execute(pool)
     .await?;
     Ok(())

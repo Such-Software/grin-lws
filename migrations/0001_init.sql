@@ -49,10 +49,16 @@ CREATE INDEX IF NOT EXISTS idx_outputs_account_spent ON outputs (rewind_hash, sp
 -- Spend detection matches an on-chain input commitment against stored outputs.
 CREATE INDEX IF NOT EXISTS idx_outputs_commit ON outputs ("commit");
 
--- Single-row chain cursor for reorg-safe resume. On a reorg, roll back rows
--- above the fork height and reset the cursor to the fork point.
+-- Single-row scanner cursor. Grin is scanned by walking the output PMMR in
+-- insertion-index order, so the resume point is an output index, not a block
+-- position. `height`/`block_hash` hold the chain tip last seen (the reorg-
+-- detection checkpoint). On a reorg the scanner rolls back rows above the fork
+-- and reseeks from there.
 CREATE TABLE IF NOT EXISTS chain_cursor (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
-    height     BIGINT  NOT NULL,
-    block_hash TEXT    NOT NULL
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    -- Highest output PMMR index already scanned (forward-scan resume point).
+    output_mmr_index BIGINT  NOT NULL DEFAULT 0,
+    -- Chain tip height + block hash at the last tick (reorg checkpoint).
+    height           BIGINT  NOT NULL,
+    block_hash       TEXT    NOT NULL
 );

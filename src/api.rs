@@ -53,8 +53,11 @@ pub struct RewindHashRequest {
 
 #[derive(Serialize)]
 pub struct BalanceResponse {
-    /// Total unspent (nanogrin).
+    /// Total unspent (nanogrin), including immature/locked outputs.
     pub total: u64,
+    /// Spendable-now total: unspent AND unlocked at the current tip (mature
+    /// coinbase, past any lock_height). Never overstates what a spend can use.
+    pub unlocked: u64,
     /// Number of unspent outputs.
     pub count: u64,
     /// How far the scanner has processed this account.
@@ -73,6 +76,9 @@ pub struct UnspentOut {
     pub mmr_index: u64,
     pub is_coinbase: bool,
     pub lock_height: u64,
+    /// Spendable at the current tip (`lock_height <= blockchain_height`). A
+    /// client must not use a non-spendable output as a transaction input.
+    pub spendable: bool,
     pub key_id: Option<String>,
     pub n_child: Option<u32>,
 }
@@ -160,13 +166,16 @@ pub async fn get_balance(
     Json(req): Json<RewindHashRequest>,
 ) -> Result<Json<BalanceResponse>> {
     validate_hex64(&req.rewind_hash, "rewind_hash")?;
+    let blockchain_height = state.node.get_tip_height().await?;
     let (total, count) = db::account_totals(&state.pool, &req.rewind_hash).await?;
+    let (unlocked, _) =
+        db::account_unlocked_totals(&state.pool, &req.rewind_hash, blockchain_height as i64).await?;
     let scanned_height = db::account_scan_height(&state.pool, &req.rewind_hash)
         .await?
         .unwrap_or(0);
-    let blockchain_height = state.node.get_tip_height().await?;
     Ok(Json(BalanceResponse {
         total,
+        unlocked,
         count,
         scanned_height,
         blockchain_height,
@@ -179,8 +188,8 @@ pub async fn get_unspent_outs(
     Json(req): Json<RewindHashRequest>,
 ) -> Result<Json<UnspentOutsResponse>> {
     validate_hex64(&req.rewind_hash, "rewind_hash")?;
-    let stored = db::unspent_outputs(&state.pool, &req.rewind_hash).await?;
     let blockchain_height = state.node.get_tip_height().await?;
+    let stored = db::unspent_outputs(&state.pool, &req.rewind_hash).await?;
     let outputs = stored
         .into_iter()
         .map(|o| UnspentOut {
@@ -189,6 +198,7 @@ pub async fn get_unspent_outs(
             height: o.height,
             mmr_index: o.mmr_index,
             is_coinbase: o.is_coinbase,
+            spendable: o.lock_height <= blockchain_height,
             lock_height: o.lock_height,
             key_id: o.key_id,
             n_child: o.n_child,
