@@ -237,3 +237,167 @@ async fn handle_reorg(
     db::set_cursor(pool, fork_index.saturating_sub(1) as i64, fork as i64, &fork_hash).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod integration {
+    //! End-to-end: drive the real `tick()` against a MOCK grin node serving the
+    //! golden-vector output, over a real SQLite store. Proves the whole pipeline
+    //! (node listing → view-only rewind → store → balance → spend reconcile).
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::secret::Secret;
+
+    // Golden depth-3 (Grim) output — its rewind_hash/commit/proof are the ones
+    // grin's own ProofBuilder produced (see src/rewind.rs golden vectors).
+    const RH: &str = "c2f675f2b05b5bed7d7f01480c6f2aaf368fe4da5e169c3b6d18bb354ba784a2";
+    const COMMIT: &str = "099c6701a2c0cf2c02ada5a051a87e554524bcfa7d77339caf35b607fc1a1b2226";
+    const PROOF: &str = "69d7d34b41a9cff366101cd1473fd28dde406de95fa29d403a30684f93a6c857409eb08742b6fd8704c73ea65e982f3f332dbb6f2c61458b6acb901b8d98be9b01cf44cbcf9a8e087638ceabd7666c2bc9728d46ce21a5560da9710e69d4ae6099ad49666851f4181b2fea9f10ff400a5fc789ef132b96668bedcc8697349798747fc68dcb32c081f39810d7d05846f955cf398abf358ec4c013c6cf35e7abb4552a1bf8a2eaff0a2c4bd5a3f232fd323f1cd59588623dfdbbd3276e1e4dbc5c00038cb18ba9ee83d70a803bcbb5f32972153454a093bbee48b14c2653ed34c5bc94b0220d10f3b97f4914d62c0288e9146ad34527634736ff28db7dc6171cee1bed2bbe3c85788417778556ceb259fe8fd7571ff884b6dacc375d56d7a528cc037993c0402c6f7b2ca13940501e798b6476ae24c4b65cca0805e98de96819b246997de4f3680bf81b3c7dbf4c456c29677e3a3be281993e06b8c8aae14559672f5103b80f5aaba187ea0c74903af9896433aec723063b695efd2254b831143c7335058496aa4a8d8a90c0bfb4260da8790f32073f4f809a59f93ef33c0379d20a48212c1ac36181eeef59ababfb1b6f9a0ce4c9baaa83299c21ccad09a0493ad79f35083b00a149d72745feb8e6776fb16f06128a37f1ffd406476deeb5e7f35208b3cc7544197be7def4509fdcbd92d8bd72e3fd0437b3f249c247981ba70bc2ebf985c3efa546ceaf953e7061b33b4f1a5da78a32406b6258483efb1c64e49b77e3ca960e1f9f1be3779d657fd879ad8d282a3bf0a19d2c6f3a0b161e4fb0e2c2dff2efbb7fbf8be5b355b22f0fe2a2166ebe0627b9006cb740a190a50dcde3c068734f9554efaa9a196c7a985239ddce0b246c34c8627297fa3b3050cac82d7af9ab7063e8873f000f533f9a250cdc777c4980cf569f6c4011fcb3dfb5b1eb995c";
+    const VALUE: u64 = 12_345_678_900;
+    const MMR: u64 = 3;
+    const HEIGHT: u64 = 100;
+
+    struct MockNode {
+        highest_index: u64,
+        tip_height: u64,
+        tip_hash: String,
+        /// Currently-unspent outputs (mmr_index, commit, proof).
+        utxos: Vec<(u64, String, String)>,
+        /// Commits the node still lists as unspent (for get_outputs).
+        present: HashSet<String>,
+    }
+
+    async fn rpc(State(m): State<Arc<Mutex<MockNode>>>, Json(req): Json<Value>) -> Json<Value> {
+        let m = m.lock().unwrap();
+        let method = req["method"].as_str().unwrap_or("");
+        let params = &req["params"];
+        let ok = |v: Value| Json(json!({ "result": { "Ok": v } }));
+        match method {
+            "get_tip" => ok(json!({
+                "height": m.tip_height, "last_block_pushed": m.tip_hash,
+                "prev_block_to_last": "", "total_difficulty": 0
+            })),
+            "get_header" => ok(json!({ "hash": m.tip_hash, "height": m.tip_height })),
+            "get_unspent_outputs" => {
+                let start = params[0].as_u64().unwrap_or(0);
+                let end = params[1].as_u64().unwrap_or(u64::MAX);
+                let outs: Vec<Value> = m
+                    .utxos
+                    .iter()
+                    .filter(|(idx, _, _)| *idx >= start && *idx <= end)
+                    .map(|(idx, commit, proof)| {
+                        json!({
+                            "output_type": "Transaction", "commit": commit, "spent": false,
+                            "proof": proof, "block_height": HEIGHT, "mmr_index": idx
+                        })
+                    })
+                    .collect();
+                let last = outs
+                    .iter()
+                    .filter_map(|o| o["mmr_index"].as_u64())
+                    .max()
+                    .unwrap_or(m.highest_index);
+                ok(json!({
+                    "highest_index": m.highest_index,
+                    "last_retrieved_index": last,
+                    "outputs": outs
+                }))
+            }
+            "get_outputs" => {
+                let commits = params[0].as_array().cloned().unwrap_or_default();
+                let present: Vec<Value> = commits
+                    .iter()
+                    .filter_map(|c| c.as_str())
+                    .filter(|c| m.present.contains(*c))
+                    .map(|c| json!({ "commit": c }))
+                    .collect();
+                ok(Value::Array(present))
+            }
+            "get_pmmr_indices" => {
+                ok(json!({ "highest_index": m.highest_index, "last_retrieved_index": 1, "outputs": [] }))
+            }
+            _ => Json(json!({ "result": { "Err": "unknown method" } })),
+        }
+    }
+
+    fn cfg_for(url: String) -> Config {
+        Config {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            database_url: Secret::new(String::new()),
+            node_foreign_api_url: url,
+            node_foreign_api_secret: Secret::new(String::new()),
+            scan_poll_secs: 1,
+            scan_batch_blocks: 100,
+            restore_max_depth_days: 0,
+            admin_key: Secret::new(String::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_discovers_then_spends_the_golden_output() {
+        // ── mock node serving the golden output as an unspent UTXO ──
+        let state = Arc::new(Mutex::new(MockNode {
+            highest_index: MMR,
+            tip_height: 500,
+            tip_hash: "tiphash".into(),
+            utxos: vec![(MMR, COMMIT.into(), PROOF.into())],
+            present: HashSet::from([COMMIT.to_string()]),
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/v2/foreign", post(rpc)).with_state(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let node = GrinNode::new(&cfg_for(format!("http://{addr}/v2/foreign"))).unwrap();
+
+        // ── real SQLite store + migration ──
+        sqlx::any::install_default_drivers();
+        let path = std::env::temp_dir().join("grinlws_scan_it.db");
+        let _ = std::fs::remove_file(&path);
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        let schema = include_str!("../migrations/0001_init.sql");
+        let no_comments: String = schema
+            .lines()
+            .map(|l| l.find("--").map(|i| &l[..i]).unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for s in no_comments.split(';') {
+            let s = s.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&pool).await.unwrap();
+            }
+        }
+
+        db::register_account(&pool, RH, HEIGHT as i64).await.unwrap();
+
+        // ── tick 1: discover ──
+        tick(&pool, &node).await.expect("tick 1");
+        let (total, count) = db::account_totals(&pool, RH).await.unwrap();
+        assert_eq!((total, count), (VALUE, 1), "golden output discovered + stored");
+        let (unlocked, _) = db::account_unlocked_totals(&pool, RH, 500).await.unwrap();
+        assert_eq!(unlocked, VALUE, "regular output is spendable now");
+        let outs = db::unspent_outputs(&pool, RH).await.unwrap();
+        assert_eq!(outs[0].key_id.as_deref(), Some("0300000000000000000000000700000000"));
+
+        // ── spend it: remove from the node's unspent set ──
+        {
+            let mut m = state.lock().unwrap();
+            m.utxos.clear();
+            m.present.clear();
+        }
+        // ── tick 2: reconcile by absence ──
+        tick(&pool, &node).await.expect("tick 2");
+        assert_eq!(db::account_totals(&pool, RH).await.unwrap().0, 0, "spent → zero balance");
+
+        let _ = std::fs::remove_file(&path);
+    }
+}

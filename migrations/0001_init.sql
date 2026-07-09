@@ -32,17 +32,21 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS outputs (
     "commit"     TEXT        PRIMARY KEY,
     rewind_hash  TEXT        NOT NULL REFERENCES accounts(rewind_hash) ON DELETE CASCADE,
-    value        BIGINT      NOT NULL,
+    -- nanogrin as a DECIMAL STRING. sqlx's `Any` driver truncates i64 -> i32
+    -- for SQLite, which would corrupt amounts > ~2.1e9 (grin values reach
+    -- ~1e16), so the value is stored as text and summed in Rust. Other integer
+    -- columns stay well under 2^31 for decades.
+    value        TEXT        NOT NULL,
     height       BIGINT      NOT NULL,
     mmr_index    BIGINT      NOT NULL,
-    is_coinbase  BOOLEAN     NOT NULL DEFAULT false,
+    is_coinbase  INTEGER     NOT NULL DEFAULT 0,  -- 0/1 (Any can't decode SQLite BOOLEAN)
     lock_height  BIGINT      NOT NULL DEFAULT 0,
     -- Recovered from the proof message during rewind (grin_recover_output
     -- equivalent, server-side). Enables direct spend by the client.
     key_id       TEXT,
     n_child      INTEGER,
     -- Spend tracking: set when this output's commitment appears as a tx input.
-    spent        BOOLEAN     NOT NULL DEFAULT false,
+    spent        INTEGER     NOT NULL DEFAULT 0,  -- 0/1 (Any can't decode SQLite BOOLEAN)
     spent_height BIGINT
 );
 

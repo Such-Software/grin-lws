@@ -4,12 +4,17 @@
 //! Uses `sqlx::Any` so a single build serves both Postgres (scale) and SQLite
 //! (single operator) — the driver is chosen at runtime from `DATABASE_URL`.
 //!
-//! Dialect: the SQL below uses Postgres `$N` placeholders and runs unchanged on
-//! BOTH Postgres and SQLite through sqlx's `Any` driver (SQLite accepts `$N`
-//! numbered parameters and binds them positionally). Verified end-to-end by the
-//! `sqlite_probe` test, which applies the real migration + reused-placeholder
-//! upserts against SQLite. `DEFAULT CURRENT_TIMESTAMP` (not `now()`) keeps the
-//! schema portable.
+//! Dialect: one schema + one set of queries serve BOTH Postgres and SQLite via
+//! sqlx's `Any` driver, verified end-to-end by the `sqlite_probe` test (real
+//! migration + reused-placeholder upserts) and the scanner integration test.
+//! Portability required working around `Any`'s quirks, NOT `$N` placeholders
+//! (SQLite accepts those and binds positionally):
+//!   - `Any` truncates i64 -> i32 for SQLite, so `outputs.value` (nanogrin, up
+//!     to ~1e16) is stored as a DECIMAL STRING and summed in Rust. Other integer
+//!     columns stay well under 2^31 for decades.
+//!   - `Any` can't decode SQLite `BOOLEAN`, so boolean flags (`is_coinbase`,
+//!     `spent`) are `INTEGER` 0/1.
+//!   - `DEFAULT CURRENT_TIMESTAMP` (not `now()`) is portable.
 //!
 //! SECURITY: only view-only data is ever stored. No spend key, no private key.
 
@@ -181,10 +186,10 @@ pub async fn insert_output(pool: &AnyPool, out: &StoredOutput, rewind_hash: &str
     )
     .bind(&out.commit)
     .bind(rewind_hash)
-    .bind(out.value as i64)
+    .bind(out.value.to_string())
     .bind(out.height as i64)
     .bind(out.mmr_index as i64)
-    .bind(out.is_coinbase)
+    .bind(out.is_coinbase as i64)
     .bind(out.lock_height as i64)
     .bind(&out.key_id)
     .bind(out.n_child.map(|n| n as i32))
@@ -195,7 +200,7 @@ pub async fn insert_output(pool: &AnyPool, out: &StoredOutput, rewind_hash: &str
 
 /// Mark an output spent (its commitment left the node's unspent set).
 pub async fn mark_spent(pool: &AnyPool, commit: &str, spent_height: i64) -> Result<()> {
-    sqlx::query("UPDATE outputs SET spent = true, spent_height = $2 WHERE \"commit\" = $1")
+    sqlx::query("UPDATE outputs SET spent = 1, spent_height = $2 WHERE \"commit\" = $1")
         .bind(commit)
         .bind(spent_height)
         .execute(pool)
@@ -206,7 +211,7 @@ pub async fn mark_spent(pool: &AnyPool, commit: &str, spent_height: i64) -> Resu
 /// Un-mark a spend (a reorg brought a previously-spent output back into the
 /// unspent set). Self-heals an over-eager spend reconcile.
 pub async fn mark_unspent(pool: &AnyPool, commit: &str) -> Result<()> {
-    sqlx::query("UPDATE outputs SET spent = false, spent_height = NULL WHERE \"commit\" = $1")
+    sqlx::query("UPDATE outputs SET spent = 0, spent_height = NULL WHERE \"commit\" = $1")
         .bind(commit)
         .execute(pool)
         .await?;
@@ -216,7 +221,7 @@ pub async fn mark_unspent(pool: &AnyPool, commit: &str) -> Result<()> {
 /// Every currently-unspent commitment across all accounts — the set the scanner
 /// re-checks against the node to detect spends by absence.
 pub async fn all_unspent_commits(pool: &AnyPool) -> Result<Vec<String>> {
-    let rows = sqlx::query("SELECT \"commit\" FROM outputs WHERE spent = false")
+    let rows = sqlx::query("SELECT \"commit\" FROM outputs WHERE spent = 0")
         .fetch_all(pool)
         .await?;
     Ok(rows.iter().map(|r| r.get::<String, _>("commit")).collect())
@@ -226,7 +231,7 @@ pub async fn all_unspent_commits(pool: &AnyPool) -> Result<Vec<String>> {
 pub async fn unspent_outputs(pool: &AnyPool, rewind_hash: &str) -> Result<Vec<StoredOutput>> {
     let rows = sqlx::query(
         "SELECT \"commit\", value, height, mmr_index, is_coinbase, lock_height, key_id, n_child \
-         FROM outputs WHERE rewind_hash = $1 AND spent = false ORDER BY height ASC",
+         FROM outputs WHERE rewind_hash = $1 AND spent = 0 ORDER BY height ASC",
     )
     .bind(rewind_hash)
     .fetch_all(pool)
@@ -235,18 +240,25 @@ pub async fn unspent_outputs(pool: &AnyPool, rewind_hash: &str) -> Result<Vec<St
     Ok(rows.iter().map(row_to_output).collect())
 }
 
+/// Sum a set of decimal-string `value` rows into `(total, count)`. Summed in
+/// Rust because `value` is stored as text (see schema) and `Any` truncates
+/// large integers for SQLite. `u128` accumulator avoids overflow across many
+/// outputs; the total is clamped to `u64` (grin's supply fits comfortably).
+fn sum_value_rows(rows: &[sqlx::any::AnyRow]) -> (u64, u64) {
+    let total: u128 = rows
+        .iter()
+        .map(|r| r.get::<String, _>("value").parse::<u64>().unwrap_or(0) as u128)
+        .sum();
+    (total.min(u64::MAX as u128) as u64, rows.len() as u64)
+}
+
 /// (total unspent, count) for an account — the balance read.
 pub async fn account_totals(pool: &AnyPool, rewind_hash: &str) -> Result<(u64, u64)> {
-    let row = sqlx::query(
-        "SELECT COALESCE(SUM(value),0) AS total, COUNT(*) AS n \
-         FROM outputs WHERE rewind_hash = $1 AND spent = false",
-    )
-    .bind(rewind_hash)
-    .fetch_one(pool)
-    .await?;
-    let total: i64 = row.try_get("total").unwrap_or(0);
-    let n: i64 = row.try_get("n").unwrap_or(0);
-    Ok((total.max(0) as u64, n.max(0) as u64))
+    let rows = sqlx::query("SELECT value FROM outputs WHERE rewind_hash = $1 AND spent = 0")
+        .bind(rewind_hash)
+        .fetch_all(pool)
+        .await?;
+    Ok(sum_value_rows(&rows))
 }
 
 /// (unlocked total, count) for an account: unspent AND spendable at `tip_height`
@@ -258,17 +270,15 @@ pub async fn account_unlocked_totals(
     rewind_hash: &str,
     tip_height: i64,
 ) -> Result<(u64, u64)> {
-    let row = sqlx::query(
-        "SELECT COALESCE(SUM(value),0) AS total, COUNT(*) AS n \
-         FROM outputs WHERE rewind_hash = $1 AND spent = false AND lock_height <= $2",
+    let rows = sqlx::query(
+        "SELECT value FROM outputs \
+         WHERE rewind_hash = $1 AND spent = 0 AND lock_height <= $2",
     )
     .bind(rewind_hash)
     .bind(tip_height)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
-    let total: i64 = row.try_get("total").unwrap_or(0);
-    let n: i64 = row.try_get("n").unwrap_or(0);
-    Ok((total.max(0) as u64, n.max(0) as u64))
+    Ok(sum_value_rows(&rows))
 }
 
 /// The height at which the scanner last processed this account.
@@ -283,10 +293,11 @@ pub async fn account_scan_height(pool: &AnyPool, rewind_hash: &str) -> Result<Op
 fn row_to_output(r: &sqlx::any::AnyRow) -> StoredOutput {
     StoredOutput {
         commit: r.get::<String, _>("commit"),
-        value: r.get::<i64, _>("value").max(0) as u64,
+        // value is stored as a decimal string (see schema note on Any/i64).
+        value: r.get::<String, _>("value").parse::<u64>().unwrap_or(0),
         height: r.get::<i64, _>("height").max(0) as u64,
         mmr_index: r.get::<i64, _>("mmr_index").max(0) as u64,
-        is_coinbase: r.get::<bool, _>("is_coinbase"),
+        is_coinbase: r.get::<i64, _>("is_coinbase") != 0,
         lock_height: r.get::<i64, _>("lock_height").max(0) as u64,
         key_id: r.try_get::<Option<String>, _>("key_id").ok().flatten(),
         n_child: r
@@ -417,7 +428,7 @@ pub async fn rollback_to(pool: &AnyPool, fork_height: i64) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     // Spends recorded above the fork are undone (the input may be unspent again).
-    sqlx::query("UPDATE outputs SET spent = false, spent_height = NULL WHERE spent_height > $1")
+    sqlx::query("UPDATE outputs SET spent = 0, spent_height = NULL WHERE spent_height > $1")
         .bind(fork_height)
         .execute(&mut *tx)
         .await?;
