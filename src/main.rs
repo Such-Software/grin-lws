@@ -29,10 +29,10 @@
 //! nothing; grin-lws holds the `rewind_hash` for scanning just as monero-lws
 //! holds the view key. NEVER a spend key.
 //!
-//! STATUS: SCAFFOLD. Routes, DTOs, config, DB layer, and the scanner loop
-//! structure are real; the two chain-crypto seams — block parsing
-//! (`grin::GrinNode::get_block`) and rangeproof rewind (`grin::rewind_output`) —
-//! are stubbed. See README.md for the build-order plan.
+//! STATUS: FUNCTIONAL. The view-only rewind (`grin::rewind_output`), the
+//! PMMR-index node reads, and the background scanner (discover / spend-reconcile
+//! / reorg / backfill) are implemented + tested. Remaining before production: a
+//! smoke test against a live grin node. See README.md.
 //!
 //! PUBLIC-CLEAN: all config is env-based with generic loopback defaults. No
 //! hostnames, operator IPs, secrets, or deploy specifics anywhere in this repo.
@@ -94,7 +94,7 @@ async fn main() {
         .expect("failed to bind grin-lws listener");
     tracing::info!(
         %bind_addr,
-        "grin-lws listening (SCAFFOLD — scanner block-parse + rewind stubbed)"
+        "grin-lws listening"
     );
     axum::serve(listener, api::router(state))
         .await

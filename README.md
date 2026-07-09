@@ -9,10 +9,14 @@ It is the Grin analogue of monero-lws: a wallet backend proxies to it exactly th
 way a backend proxies to the Monero LWS — forward a view credential, serve the
 stored results back to the wallet.
 
-**Status: SCAFFOLD.** The HTTP surface, DTOs, config, database layer, and the
-scanner loop *structure* are real and build. The two chain-crypto seams — block
-parsing and rangeproof rewind — are stubbed; wiring them up is the main remaining
-milestone (see [Build order](#build-order)).
+**Status: FUNCTIONAL.** The view-only rangeproof rewind, the PMMR-index node
+reads, and the background scanner (discover / spend-reconcile / reorg / backfill)
+are all implemented and tested. The rewind is cross-validated against grin's own
+reference `ProofBuilder` and passed an adversarial money-safety review; an
+end-to-end test drives the real scanner against a mock grin node (modeled on the
+Foreign API v2) over both SQLite and Postgres. Remaining before production: a
+smoke test against a live grin node with a funded wallet. See
+[Build order](#build-order).
 
 [monero-lws]: https://github.com/vtnerd/monero-lws
 
@@ -179,27 +183,26 @@ output-identify helper — `/get_unspent_outs` returns paths directly.
 Ship in stages; the deployed on-demand `/wallet/grin/scan` keeps serving balance
 throughout, so nothing here blocks the client refactor.
 
-1. **Scaffold (this repo).** ✅ Routes, DTOs, config, DB layer, scanner loop
-   structure, migrations, health/readiness. User-API reads already work against
-   the DB; the store is just empty until the scanner fills it.
-2. **Grin node reads.** Implement `grin::GrinNode::get_block` and
-   `get_tip_height` against the Foreign API v2, and `push_transaction` for
-   `/submit_raw_tx`. After this, `/height` and broadcast are live.
-3. **Rangeproof rewind (the core milestone).** Implement `grin::rewind_output`:
-   compute the rewind nonce from `rewind_hash` + commitment, rewind the
-   Bulletproof, and parse the proof message to recover `(value, key_id,
-   n_child)` — the server-side analog of `grin_recover_output`. Add the
-   `secp256k1` / bulletproof crypto deps (commented in `Cargo.toml`).
-4. **Scanner fill + spend detection.** Wire the `tick` loop: page blocks, rewind
-   per account, `insert_output` on matches, `mark_spent` on input commitments,
-   advance `chain_cursor`.
-5. **Reorg handling + backfill.** Detect `prev_hash` mismatch, `rollback_to` the
-   fork, reseek. Backfill from each account's `start_height`.
-6. **Backend proxy.** Land `GrinLwsConfig` + `GrinLwsClient` behind the
-   `grin_lws` feature flag; parity-check against the on-demand path; then retire
-   the embedded grin-wallet coupling.
-
-Steps 3–5 are the bulk of the work and are why this is its own project.
+1. **Scaffold.** ✅ Routes, DTOs, config, DB layer, migrations, health/readiness.
+2. **Rangeproof rewind (the core milestone).** ✅ `grin::rewind_output`: compute
+   the rewind nonce from `rewind_hash` + commitment, rewind the Bulletproof, and
+   parse the proof message to recover `(value, key_id, n_child)` — VIEW-ONLY, the
+   server-side analog of `grin_recover_output`. Cross-validated against grin's
+   reference `ProofBuilder`; adversarial money-safety review passed. (v3 outputs
+   only — legacy needs the master secret, same as grin-wallet's view-only scan.)
+3. **Grin node reads.** ✅ `get_unspent_outputs` (PMMR-index, with proofs),
+   `get_outputs` (spend-by-absence), `get_pmmr_indices`, `get_header`, `get_tip`,
+   `push_transaction` — all against the Foreign API v2, defensively parsed.
+4. **Scanner.** ✅ The `tick` loop: page the UTXO set from the cursor, rewind per
+   caught-up account, `insert_output` on matches, spend-reconcile by absence,
+   advance the cursor + account scan heights, coinbase-maturity/lock read path.
+5. **Reorg + backfill.** ✅ Detect via header-hash mismatch at the checkpoint,
+   bounded `rollback_to`, reseek; backfill a new account from its birthday index.
+6. **Live-node smoke test.** ⏳ Point at a real grin node with a funded wallet and
+   confirm balance/outputs match grin-wallet's `scan_rewind_hash`.
+7. **Backend proxy.** ⏳ Land a `GrinLwsClient` in a wallet backend behind a
+   feature flag; parity-check against the on-demand path; retire the embedded
+   grin-wallet coupling.
 
 ---
 
@@ -216,10 +219,10 @@ cargo run               # binds GRINLWS_BIND (default 127.0.0.1:3480)
 curl localhost:3480/health
 ```
 
-In the scaffold, `/height`, `/submit_raw_tx`, and `/ready` require a reachable
-grin node (they return `502` otherwise); `/register`, `/get_balance`, and
-`/get_unspent_outs` work against the DB but return empty until the scanner is
-implemented; `/health` always works.
+`/height`, `/submit_raw_tx`, and `/ready` require a reachable grin node (they
+return `502` otherwise). `/register`, `/get_balance`, and `/get_unspent_outs`
+read from the DB store, which the background scanner fills once it has a grin
+node to page the output set from. `/health` always works.
 
 ## Deployment
 
