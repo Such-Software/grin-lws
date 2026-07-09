@@ -87,6 +87,13 @@ async fn tick(pool: &AnyPool, node: &GrinNode) -> crate::error::Result<()> {
         .map(|a| a.rewind_hash.clone())
         .collect();
 
+    tracing::debug!(
+        accounts = accounts.len(),
+        caught_up = caught_up.len(),
+        from_index,
+        prev_tip,
+        "tick: scanning"
+    );
     let highest = forward_scan(pool, node, from_index, &caught_up).await?;
     let new_mmr_index = highest.max(cursor.as_ref().map(|c| c.output_mmr_index).unwrap_or(0));
 
@@ -118,11 +125,15 @@ async fn forward_scan(
 ) -> crate::error::Result<u64> {
     let mut start = from_index;
     let mut highest = from_index.saturating_sub(1);
+    let (mut scanned, mut matched) = (0u64, 0u64);
     loop {
         let page = node.get_unspent_outputs(start, None, PAGE_MAX).await?;
         highest = highest.max(page.highest_index);
         for out in &page.outputs {
-            store_first_match(pool, out, accounts).await?;
+            scanned += 1;
+            if store_first_match(pool, out, accounts).await? {
+                matched += 1;
+            }
         }
         // Terminate when the page reached the tip, or made no forward progress
         // (defensive against a node that doesn't advance `last_retrieved_index`).
@@ -131,6 +142,7 @@ async fn forward_scan(
         }
         start = page.last_retrieved_index + 1;
     }
+    tracing::debug!(from_index, highest, scanned, matched, "forward_scan done");
     Ok(highest)
 }
 
@@ -140,7 +152,7 @@ async fn store_first_match(
     pool: &AnyPool,
     out: &crate::grin::ChainOutput,
     accounts: &[String],
-) -> crate::error::Result<()> {
+) -> crate::error::Result<bool> {
     for rh in accounts {
         if let Some(r) = crate::grin::rewind_output(rh, out) {
             let lock_height = if out.is_coinbase {
@@ -163,10 +175,10 @@ async fn store_first_match(
                 rh,
             )
             .await?;
-            break;
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Mark any stored-unspent output that the node no longer lists as spent.
@@ -200,11 +212,14 @@ async fn backfill_account(
     tip_height: u64,
 ) -> crate::error::Result<()> {
     let start = node.start_index_for_height(acct.start_height).await?;
+    tracing::info!(birthday = acct.start_height, start, up_to_index, "backfill start");
     let only = [acct.rewind_hash.clone()];
     let mut idx = start;
+    let mut scanned = 0u64;
     loop {
         let page = node.get_unspent_outputs(idx, Some(up_to_index), PAGE_MAX).await?;
         for out in &page.outputs {
+            scanned += 1;
             store_first_match(pool, out, &only).await?;
         }
         let reached = page.last_retrieved_index.min(page.highest_index);
@@ -214,7 +229,7 @@ async fn backfill_account(
         idx = page.last_retrieved_index + 1;
     }
     db::set_account_scan_height(pool, &acct.rewind_hash, tip_height as i64).await?;
-    tracing::info!(height = tip_height, "grin-lws backfilled a new account");
+    tracing::info!(height = tip_height, scanned, "grin-lws backfilled a new account");
     Ok(())
 }
 
