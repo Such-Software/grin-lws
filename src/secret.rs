@@ -1,5 +1,5 @@
 //! A tiny redacting wrapper so secrets (DB URL, node auth, admin key) never leak
-//! into `Debug` output or tracing spans. Mirrors smirk-backend-core's `Secret`.
+//! into `Debug` output or tracing spans.
 
 #[derive(Clone)]
 pub struct Secret(String);

@@ -10,25 +10,24 @@
 //!
 //! WHY A DB
 //! --------
-//! smirk-backend-core's current `POST /wallet/grin/scan` is an ON-DEMAND,
-//! STATELESS proxy: each request forwards a `rewind_hash` to grin-wallet's
-//! `scan_rewind_hash`, which rescans and returns matches, storing NOTHING. That
-//! is fine for grin's small UTXO set but it is NOT a light-wallet-server. A real
-//! LWS — like monero-lws — keeps a per-account output store maintained by a
-//! background scanner, so reads are O(rows) not O(chain). Hence this service
-//! needs a database (the 3 tables in `migrations/`).
+//! A typical wallet backend exposes an ON-DEMAND, STATELESS grin scan: each
+//! request forwards a `rewind_hash` to grin-wallet's `scan_rewind_hash`, which
+//! rescans and returns matches, storing NOTHING. That is fine for grin's small
+//! UTXO set but it is NOT a light-wallet-server. A real LWS — like monero-lws —
+//! keeps a per-account output store maintained by a background scanner, so reads
+//! are O(rows) not O(chain). Hence this service needs a database (the 3 tables in
+//! `migrations/`).
 //!
-//! HOW smirk-backend-core PROXIES TO IT
-//! ------------------------------------
-//! Identical wiring to the XMR/WOW LWS (`infra/lws/client.rs`): the backend adds
-//! a `GrinLwsConfig { lws_url, admin_url?, admin_key? }` and a `GrinLwsClient`;
-//! when the `grin_lws` feature is on, `POST /wallet/grin/scan` forwards the
-//! `rewind_hash` to this service's `/get_unspent_outs` (and registers via
-//! `/register` at balance-fetch time, idempotently, exactly as `fetchLwsBalance`
-//! awaits `registerLws` for XMR/WOW). Non-custodial guarantee preserved: the
-//! backend forwards only the `rewind_hash` and stores nothing; grin-lws holds
-//! the `rewind_hash` for scanning just as monero-lws holds the view key. NEVER a
-//! spend key.
+//! HOW A WALLET BACKEND PROXIES TO IT
+//! ----------------------------------
+//! Identical wiring to a Monero LWS client: the backend adds a grin-lws client
+//! (`lws_url`, optional `admin_url` + `admin_key`); behind a feature flag, its
+//! grin scan endpoint forwards the `rewind_hash` to this service's
+//! `/get_unspent_outs` (and registers via `/register` at balance-fetch time,
+//! idempotently, exactly as it awaits LWS registration for Monero). Non-custodial
+//! guarantee preserved: the backend forwards only the `rewind_hash` and stores
+//! nothing; grin-lws holds the `rewind_hash` for scanning just as monero-lws
+//! holds the view key. NEVER a spend key.
 //!
 //! STATUS: SCAFFOLD. Routes, DTOs, config, DB layer, and the scanner loop
 //! structure are real; the two chain-crypto seams — block parsing

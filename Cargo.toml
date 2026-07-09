@@ -5,6 +5,11 @@ edition = "2021"
 rust-version = "1.75"
 description = "Grin light-wallet-server: register a view credential, scan the chain in the background, store recognized outputs in a DB, and serve balance/outputs/broadcast/height."
 license = "MIT"
+repository = "https://github.com/Such-Software/grin-lws"
+readme = "README.md"
+keywords = ["grin", "light-wallet-server", "lws", "mimblewimble", "wallet"]
+categories = ["cryptography::cryptocurrencies"]
+# crates.io publish is gated until the rangeproof-rewind crypto lands (scaffold).
 publish = false
 
 [[bin]]

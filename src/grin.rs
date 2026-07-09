@@ -4,9 +4,8 @@
 //! block outputs (commit + rangeproof), and relay a finalized transaction. This
 //! is the ONLY component that reaches the chain; everything else reads the DB.
 //!
-//! Hostile-upstream hygiene (carried from smirk-backend-core's node client):
-//! per-request + connect timeouts, a streaming body-size cap, and errors that
-//! never interpolate an untrusted node body.
+//! Hostile-upstream hygiene: per-request + connect timeouts, a streaming
+//! body-size cap, and errors that never interpolate an untrusted node body.
 //!
 //! REWIND (the hard, deferred part): recognizing which of a block's outputs
 //! belong to a registered account means rewinding each output's Bulletproof

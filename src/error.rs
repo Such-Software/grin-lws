@@ -1,8 +1,7 @@
 //! Error type mapped to HTTP responses.
 //!
-//! Hostile-upstream hygiene (carried over from smirk-backend-core's LWS/grin
-//! clients): a node/DB error NEVER interpolates an untrusted upstream response
-//! body into the client-facing message.
+//! Hostile-upstream hygiene: a node/DB error NEVER interpolates an untrusted
+//! upstream response body into the client-facing message.
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 

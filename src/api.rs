@@ -1,10 +1,11 @@
-//! HTTP surface — mirrors the monero-lws user API so smirk-backend-core can
-//! proxy to it exactly as it proxies the XMR/WOW LWS (see `infra/lws/client.rs`).
+//! HTTP surface — mirrors the monero-lws user API so a wallet backend can proxy
+//! to it exactly as it proxies a Monero LWS.
 //!
 //! AUTH: the user API is unauthenticated at THIS layer — grin-lws binds to
-//! loopback / a private network and trusts smirk-backend-core (which does the
-//! JWT auth) as its only caller. The admin API (`/list_accounts`, `/rescan`) is
-//! gated by a shared bearer (`GRINLWS_ADMIN_KEY`) and disabled when unset.
+//! loopback / a private network and trusts the proxying wallet backend (which
+//! does the JWT auth) as its only caller. The admin API (`/list_accounts`,
+//! `/rescan`) is gated by a shared bearer (`GRINLWS_ADMIN_KEY`) and disabled
+//! when unset.
 //!
 //! The `rewind_hash` in every user request is a VIEW credential (public-key
 //! derived — it cannot spend). Its request DTOs omit `Debug` so it is never

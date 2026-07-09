@@ -5,9 +5,9 @@ view credential, run a **background scanner** over the Grin chain, **store**
 recognized outputs (with recovered derivation paths) in a **database**, and
 serve balance / unspent-outputs / broadcast / height fast from that store.
 
-It is the Grin analogue of monero-lws, and lets any backend proxy to it exactly
-the way `smirk-backend-core`'s `xmr_wow.rs` proxies to the Monero LWS via
-`infra/lws/client.rs`.
+It is the Grin analogue of monero-lws: a wallet backend proxies to it exactly the
+way a backend proxies to the Monero LWS — forward a view credential, serve the
+stored results back to the wallet.
 
 **Status: SCAFFOLD.** The HTTP surface, DTOs, config, database layer, and the
 scanner loop *structure* are real and build. The two chain-crypto seams — block
@@ -20,12 +20,12 @@ milestone (see [Build order](#build-order)).
 
 ## Why this exists (and why it needs a DB)
 
-`smirk-backend-core`'s current `POST /wallet/grin/scan` is an **on-demand,
-stateless proxy**: each request forwards a `rewind_hash` to grin-wallet's
-`scan_rewind_hash`, which rescans the chain and returns matches, **storing
-nothing**. That works for Grin's small UTXO set, but it is *not* a
-light-wallet-server — every read re-pays the scan cost, and it has no output
-store to recover derivation paths from.
+A common wallet-backend approach is an **on-demand, stateless** grin scan: each
+request forwards a `rewind_hash` to grin-wallet's `scan_rewind_hash`, which
+rescans the chain and returns matches, **storing nothing**. That works for
+Grin's small UTXO set, but it is *not* a light-wallet-server — every read
+re-pays the scan cost, and it has no output store to recover derivation paths
+from.
 
 A real LWS — like monero-lws — keeps a **per-account output store** maintained by
 a **background scanner**, so client reads are O(rows) not O(chain), and it can
@@ -145,33 +145,32 @@ chain_cursor(id=1 PK, height, block_hash)   -- reorg-safe resume
 
 ---
 
-## How `smirk-backend-core` proxies to it
+## How a wallet backend proxies to it
 
-Identical wiring to the XMR/WOW LWS (`infra/lws/client.rs`):
+Identical wiring to a Monero LWS client — forward the view credential, serve the
+stored results:
 
 ```
-wallet ──JWT──▶ smirk-backend-core ──private──▶ grin-lws ──▶ grin node
-  /api/v1/wallet/grin/scan          /get_unspent_outs         (Foreign API v2)
+wallet ──JWT──▶ wallet backend ──private──▶ grin-lws ──▶ grin node
+  /wallet/grin/scan             /get_unspent_outs         (Foreign API v2)
 ```
 
-1. Add `GrinLwsConfig { lws_url, admin_url?, admin_key? }` in `config.rs`, next
-   to `LwsConfig`.
-2. Add a `GrinLwsClient` in `infra/` mirroring `infra/lws/client.rs` (shared
-   `reqwest::Client`, timeouts, size-capped hostile-response reads, `Secret`-
-   wrapped admin key).
-3. Behind a `features.chains.grin_lws` flag, `POST /wallet/grin/scan` forwards
-   the `rewind_hash` to grin-lws `/get_unspent_outs` (returning outputs **with
-   paths**) instead of driving grin-wallet `scan_rewind_hash` on-demand.
+1. Add a grin-lws client config (`lws_url`, optional `admin_url` + `admin_key`)
+   alongside your existing Monero-LWS config.
+2. Add an HTTP client mirroring your Monero-LWS client (shared `reqwest::Client`,
+   timeouts, size-capped hostile-response reads, a `Secret`-wrapped admin key).
+3. Behind a feature flag, have your grin scan endpoint forward the `rewind_hash`
+   to grin-lws `/get_unspent_outs` (returning outputs **with paths**) instead of
+   driving grin-wallet `scan_rewind_hash` on-demand.
 4. Register at balance-fetch time by forwarding `rewind_hash` to grin-lws
-   `/register` (idempotent), exactly as `fetchLwsBalance` awaits `registerLws`
-   for XMR/WOW.
+   `/register` (idempotent), exactly as you await LWS registration for Monero.
 
 **Non-custodial guarantee preserved end to end:** the backend forwards only the
 `rewind_hash` and stores nothing; grin-lws holds the `rewind_hash` for scanning
 just as monero-lws holds the view key. No spend key ever leaves the wallet.
 
-When grin-lws ships, the client can **drop** its `grin_identify_output` helper —
-`/get_unspent_outs` returns paths directly.
+Once grin-lws is wired in, the wallet client can **drop** any client-side
+output-identify helper — `/get_unspent_outs` returns paths directly.
 
 ---
 
@@ -228,3 +227,12 @@ Run as a private service alongside a grin node and its database. Bind to
 loopback / a private network; expose it only to the proxying backend. Add a
 readiness probe on `/ready`. Everything is env-configured — no code changes to
 deploy.
+
+---
+
+## License & provenance
+
+MIT — see [`LICENSE`](LICENSE).
+
+grin-lws was extracted from the [Smirk](https://smirk.cash) wallet's backend and
+generalized into a standalone service that any wallet backend can run.
