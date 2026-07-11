@@ -18,12 +18,6 @@
 //!
 //! SECURITY: only view-only data is ever stored. No spend key, no private key.
 
-// Several write helpers (insert_output, mark_spent, set_cursor, rollback_to) are
-// exercised only by the scanner, which is a deferred milestone in this scaffold.
-// They are real and tested-shaped; allow them to be unused until the scanner
-// loop is wired up.
-#![allow(dead_code)]
-
 use sqlx::any::AnyPoolOptions;
 use sqlx::{AnyPool, Row};
 
@@ -197,7 +191,10 @@ pub async fn mark_spent(pool: &AnyPool, commit: &str, spent_height: i64) -> Resu
 }
 
 /// Un-mark a spend (a reorg brought a previously-spent output back into the
-/// unspent set). Self-heals an over-eager spend reconcile.
+/// unspent set). Self-heals an over-eager spend reconcile. Retained as the
+/// single-commit counterpart to `mark_spent`; the reorg path currently un-spends
+/// in bulk via `rollback_to`, so this is not yet called.
+#[allow(dead_code)]
 pub async fn mark_unspent(pool: &AnyPool, commit: &str) -> Result<()> {
     sqlx::query("UPDATE outputs SET spent = 0, spent_height = NULL WHERE \"commit\" = $1")
         .bind(commit)

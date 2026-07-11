@@ -357,7 +357,6 @@ mod integration {
             node_foreign_api_url: url,
             node_foreign_api_secret: Secret::new(String::new()),
             scan_poll_secs: 1,
-            scan_batch_blocks: 100,
             restore_max_depth_days: 0,
             admin_key: Secret::new(String::new()),
         }

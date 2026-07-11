@@ -29,10 +29,11 @@
 //! nothing; grin-lws holds the `rewind_hash` for scanning just as monero-lws
 //! holds the view key. NEVER a spend key.
 //!
-//! STATUS: FUNCTIONAL. The view-only rewind (`grin::rewind_output`), the
-//! PMMR-index node reads, and the background scanner (discover / spend-reconcile
-//! / reorg / backfill) are implemented + tested. Remaining before production: a
-//! smoke test against a live grin node. See README.md.
+//! STATUS: FUNCTIONAL and running in production. The view-only rewind
+//! (`grin::rewind_output`), the PMMR-index node reads, and the background scanner
+//! (discover / spend-reconcile / reorg / backfill) are implemented + tested, and
+//! the service has been validated against a live grin node with a funded wallet.
+//! See README.md.
 //!
 //! PUBLIC-CLEAN: all config is env-based with generic loopback defaults. No
 //! hostnames, operator IPs, secrets, or deploy specifics anywhere in this repo.
@@ -75,7 +76,7 @@ async fn main() {
         .await
         .expect("failed to build database pool");
     // In production, run `sqlx migrate run` (or embed `sqlx::migrate!()`) against
-    // DATABASE_URL before serving. Left explicit here so the scaffold starts
+    // DATABASE_URL before serving. Left explicit here so the service starts
     // without a live DB.
 
     let node = GrinNode::new(&config).expect("failed to build grin node client");

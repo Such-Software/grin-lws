@@ -25,9 +25,6 @@ pub struct Config {
 
     /// How often the background scanner polls for new blocks.
     pub scan_poll_secs: u64,
-    /// How many blocks the scanner processes per batch (bounds memory / a single
-    /// transaction's size).
-    pub scan_batch_blocks: u64,
     /// How far behind the tip a newly-registered account may start scanning from
     /// (restore-depth bound). `0` = unbounded.
     pub restore_max_depth_days: u32,
@@ -55,7 +52,6 @@ impl Config {
             ),
             node_foreign_api_secret: Secret::new(env_or("GRIN_NODE_API_SECRET", "")),
             scan_poll_secs: parse_or("GRINLWS_SCAN_POLL_SECS", 15),
-            scan_batch_blocks: parse_or("GRINLWS_SCAN_BATCH_BLOCKS", 100),
             restore_max_depth_days: parse_or("GRINLWS_RESTORE_MAX_DEPTH_DAYS", 0) as u32,
             admin_key: Secret::new(env_or("GRINLWS_ADMIN_KEY", "")),
         }

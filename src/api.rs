@@ -235,7 +235,7 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
-/// Readiness — reaches the grin node (503 when the node is down).
+/// Readiness — reaches the grin node (502 when the node is down).
 pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Json<HealthResponse>> {
     state.node.health_check().await?;
     Ok(Json(HealthResponse {

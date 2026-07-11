@@ -23,10 +23,6 @@ pub enum Error {
 
     #[error("database error")]
     Db(#[from] sqlx::Error),
-
-    /// A route that is deliberately stubbed in this scaffold.
-    #[error("{0} not implemented (scaffold)")]
-    NotImplemented(&'static str),
 }
 
 impl IntoResponse for Error {
@@ -41,7 +37,6 @@ impl IntoResponse for Error {
                 tracing::error!(error = %e, "database error");
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         };
         let message = match &self {
             Error::Db(_) => "internal error".to_string(),
